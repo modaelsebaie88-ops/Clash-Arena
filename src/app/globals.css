@@ -1,0 +1,224 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Clash Arena - the stage.
+ * Dark-only on purpose: this is a live competition, not a document tool.
+ * See DESIGN.md before changing anything here.
+ */
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    background-color: #08090a;
+    /* Stop iOS from rubber-banding the whole arena during a live round. */
+    overscroll-behavior-y: none;
+  }
+
+  body {
+    @apply bg-ink text-chalk antialiased;
+    font-family: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
+    min-height: 100dvh;
+  }
+
+  /* Film grain. Keeps large black areas from reading as dead flat.
+     Fixed and pointer-transparent so it never costs a repaint on scroll. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    pointer-events: none;
+    opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  *:focus-visible {
+    outline: 2px solid #ccff00;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: #ccff00;
+    color: #08090a;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #08090a;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2a2e34;
+    border-radius: 99px;
+  }
+
+  /* Numbers must never jitter while counting or ticking. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+}
+
+@layer components {
+  /* ---- type lockups ------------------------------------------------- */
+
+  .kicker {
+    @apply font-data text-kicker uppercase text-smoke;
+  }
+
+  .kicker-volt {
+    @apply font-data text-kicker uppercase text-volt;
+  }
+
+  .display {
+    font-family: var(--font-display), Impact, sans-serif;
+    @apply uppercase leading-[0.86] tracking-[-0.005em];
+  }
+
+  /* A number set as an object, with its label tucked underneath. */
+  .numeral {
+    @apply font-data tnum font-extrabold leading-[0.85] tracking-[-0.03em];
+  }
+
+  /* ---- surfaces ------------------------------------------------------ */
+
+  .deck {
+    @apply rounded-md border border-rail bg-deck;
+  }
+
+  .pit {
+    @apply border border-rail bg-pit;
+  }
+
+  /* Edge-to-edge list on mobile: reads as a scoreboard, not a card stack. */
+  .bleed {
+    @apply -mx-gutter sm:mx-0;
+  }
+
+  /* ---- signature devices --------------------------------------------- */
+
+  /* Hazard stripes: LIVE and PAUSED chrome only, always as a thin band. */
+  .hazard {
+    background-image: repeating-linear-gradient(
+      45deg,
+      rgba(255, 92, 26, 0.9) 0px,
+      rgba(255, 92, 26, 0.9) 8px,
+      transparent 8px,
+      transparent 20px
+    );
+    background-size: 40px 100%;
+  }
+
+  .hazard-volt {
+    background-image: repeating-linear-gradient(
+      45deg,
+      rgba(204, 255, 0, 0.85) 0px,
+      rgba(204, 255, 0, 0.85) 8px,
+      transparent 8px,
+      transparent 20px
+    );
+    background-size: 40px 100%;
+  }
+
+  /* The ticket notch on tournament posters - the product's signature object. */
+  .notched {
+    -webkit-mask-image: radial-gradient(circle 11px at 0 50%, transparent 98%, #000 100%),
+      radial-gradient(circle 11px at 100% 50%, transparent 98%, #000 100%);
+    -webkit-mask-composite: source-in;
+    mask-image: radial-gradient(circle 11px at 0 50%, transparent 98%, #000 100%),
+      radial-gradient(circle 11px at 100% 50%, transparent 98%, #000 100%);
+    mask-composite: intersect;
+  }
+
+  /* Fine blueprint grid used behind hero lockups. */
+  .grid-field {
+    background-image:
+      linear-gradient(to right, rgba(42, 46, 52, 0.55) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(42, 46, 52, 0.55) 1px, transparent 1px);
+    background-size: 28px 28px;
+    -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 10%, transparent 75%);
+    mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 10%, transparent 75%);
+  }
+
+  /* Loading shimmer that matches the stage rather than a generic grey pulse. */
+  .shimmer {
+    @apply relative overflow-hidden bg-deck;
+  }
+  .shimmer::after {
+    content: '';
+    @apply absolute inset-0 animate-sweep;
+    background: linear-gradient(90deg, transparent, rgba(244, 245, 243, 0.06), transparent);
+  }
+
+  /* ---- interaction --------------------------------------------------- */
+
+  /* Physical press. Applied to every tappable surface in the arena. */
+  .pressable {
+    @apply transition-transform duration-100 active:scale-[0.97];
+  }
+
+  .answer-row {
+    @apply flex w-full items-center gap-4 rounded-md border border-rail bg-deck p-4 text-left;
+    @apply transition-[transform,border-color,background-color] duration-150;
+    min-height: 68px;
+  }
+
+  .answer-row[data-selected='true'] {
+    @apply border-2 border-volt bg-volt/10;
+    transform: translateX(4px);
+  }
+
+  .answer-row[data-state='correct'] {
+    @apply border-2 border-win bg-win/10;
+  }
+
+  .answer-row[data-state='wrong'] {
+    @apply border-2 border-loss bg-loss/10;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Fixed bottom chrome must clear the iOS home indicator. */
+  .pb-safe {
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+  }
+  .mb-safe {
+    margin-bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  /* Reserve room for the floating nav so content never hides behind it. */
+  .pb-nav {
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

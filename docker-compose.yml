@@ -1,0 +1,40 @@
+# Local development infrastructure for the Clash Arena tournament platform.
+#   docker compose up -d
+# Postgres is required. Redis is optional: the app falls back to an in-process
+# cache/pub-sub when REDIS_URL is not set (see src/lib/cache/cache.ts).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: clasharena-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clasharena
+      POSTGRES_PASSWORD: clasharena
+      POSTGRES_DB: clasharena
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U clasharena -d clasharena']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: clasharena-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres-data:
+  redis-data:

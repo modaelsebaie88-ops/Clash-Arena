@@ -1,0 +1,411 @@
+// ---------------------------------------------------------------------------
+// Clash Arena - database schema
+//
+// Design notes
+// * Submission carries a compound unique key (questionId, userId). That single
+//   constraint is what makes duplicate submissions impossible under load: the
+//   database rejects the second insert no matter how many requests race.
+// * TournamentParticipant stores denormalised aggregates (points, streaks,
+//   rank). They are a cache that is only ever written inside the same
+//   transaction that writes the Submission, so they cannot drift.
+// * Anything a participant must not see early (answer keys) lives in columns
+//   that the API layer strips before serialising, never in a shared payload.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  PARTICIPANT
+}
+
+enum TournamentStatus {
+  DRAFT
+  REGISTRATION_OPEN
+  WAITING
+  LIVE
+  PAUSED
+  FINISHED
+  ARCHIVED
+}
+
+enum QuestionType {
+  MCQ
+  TRUE_FALSE
+  SHORT_ANSWER
+  NUMERIC
+  IMAGE_SUBMISSION
+}
+
+enum QuestionStatus {
+  UPCOMING
+  ACTIVE
+  CLOSED
+}
+
+enum ParticipantStatus {
+  PENDING
+  ACTIVE
+  DISQUALIFIED
+}
+
+enum SubmissionStatus {
+  PENDING_REVIEW
+  AUTO_GRADED
+  MANUALLY_GRADED
+}
+
+enum SubmissionOutcome {
+  PENDING
+  CORRECT
+  PARTIAL
+  INCORRECT
+  NO_ANSWER
+}
+
+model User {
+  id           String  @id @default(cuid())
+  email        String  @unique
+  username     String  @unique
+  displayName  String
+  passwordHash String
+  role         Role    @default(PARTICIPANT)
+  avatarUrl    String?
+  bio          String?
+
+  // Lifetime statistics, refreshed when a tournament finishes.
+  totalTournaments Int @default(0)
+  totalWins        Int @default(0)
+  totalPoints      Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hostedTournaments Tournament[]            @relation("TournamentHost")
+  participations    TournamentParticipant[]
+  submissions       Submission[]            @relation("SubmissionAuthor")
+  gradedSubmissions Submission[]            @relation("SubmissionGrader")
+  scores            Score[]
+  badges            UserBadge[]
+  notifications     Notification[]
+  tournamentEvents  TournamentEvent[]       @relation("EventActor")
+  uploads           UploadedFile[]
+
+  @@index([role])
+}
+
+model Tournament {
+  id            String           @id @default(cuid())
+  code          String           @unique
+  name          String
+  description   String?
+  coverImageUrl String?
+  rules         String?
+  status        TournamentStatus @default(DRAFT)
+
+  startAt DateTime?
+  endAt   DateTime?
+
+  maxParticipants   Int     @default(200)
+  joinByCodeEnabled Boolean @default(true)
+  requireApproval   Boolean @default(false)
+  allowLateJoin     Boolean @default(true)
+
+  showLeaderboardAfterQuestion Boolean @default(true)
+  showAnswersToParticipants    Boolean @default(true)
+
+  defaultTimeLimitSeconds Int @default(30)
+  defaultBasePoints       Int @default(100)
+
+  // ScoringConfig - see src/lib/services/scoring-service.ts
+  scoringConfig Json
+  // Ordered tie-break keys - see src/lib/services/leaderboard-service.ts
+  tieBreakers   Json
+
+  // ----- server authoritative live state -----
+  currentQuestionId String?
+  questionStartedAt DateTime?
+  questionEndsAt    DateTime?
+  startedAt         DateTime?
+  pausedAt          DateTime?
+  // Milliseconds of the active question consumed before the current pause.
+  pausedElapsedMs   Int       @default(0)
+  finishedAt        DateTime?
+
+  hostId String
+  host   User   @relation("TournamentHost", fields: [hostId], references: [id], onDelete: Cascade)
+
+  questions    Question[]
+  participants TournamentParticipant[]
+  submissions  Submission[]
+  scores       Score[]
+  snapshots    LeaderboardSnapshot[]
+  events       TournamentEvent[]
+  badgeAwards  UserBadge[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([hostId])
+  @@index([startAt])
+}
+
+model Question {
+  id           String       @id @default(cuid())
+  tournamentId String
+  tournament   Tournament   @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  order        Int
+  type         QuestionType
+  prompt       String
+  imageUrl     String?
+  explanation  String?
+
+  timeLimitSeconds Int @default(30)
+  basePoints       Int @default(100)
+  speedBonusPoints Int @default(50)
+
+  // Answer key shape depends on type, validated by the question service.
+  //   MCQ / TRUE_FALSE -> correctness lives on QuestionOption.isCorrect
+  //   SHORT_ANSWER     -> { accepted: string[], caseSensitive: boolean }
+  //   NUMERIC          -> { value: number, tolerance: number }
+  //   IMAGE_SUBMISSION -> null (graded by a human, later by AI)
+  answerKey Json?
+
+  requiresManualGrading Boolean        @default(false)
+  status                QuestionStatus @default(UPCOMING)
+
+  startedAt DateTime?
+  endsAt    DateTime?
+  closedAt  DateTime?
+
+  options     QuestionOption[]
+  submissions Submission[]
+  scores      Score[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tournamentId, order])
+  @@index([tournamentId, status])
+}
+
+model QuestionOption {
+  id         String   @id @default(cuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  order      Int
+  text       String
+  imageUrl   String?
+  isCorrect  Boolean  @default(false)
+
+  @@index([questionId])
+}
+
+model TournamentParticipant {
+  id           String            @id @default(cuid())
+  tournamentId String
+  tournament   Tournament        @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status       ParticipantStatus @default(ACTIVE)
+
+  joinedAt           DateTime  @default(now())
+  approvedAt         DateTime?
+  disqualifiedAt     DateTime?
+  disqualifiedReason String?
+
+  // Aggregates written inside the submission transaction.
+  totalPoints         Int  @default(0)
+  answeredCount       Int  @default(0)
+  correctCount        Int  @default(0)
+  wrongCount          Int  @default(0)
+  totalResponseTimeMs Int  @default(0)
+  fastestResponseMs   Int?
+  currentStreak       Int  @default(0)
+  bestStreak          Int  @default(0)
+
+  rank         Int?
+  previousRank Int?
+  bestRank     Int?
+  finalRank    Int?
+
+  lastSubmissionAt DateTime?
+
+  submissions Submission[]
+  scores      Score[]
+
+  @@unique([tournamentId, userId])
+  @@index([tournamentId, totalPoints])
+  @@index([userId])
+}
+
+model Submission {
+  id            String                @id @default(cuid())
+  tournamentId  String
+  tournament    Tournament            @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  questionId    String
+  question      Question              @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User                  @relation("SubmissionAuthor", fields: [userId], references: [id], onDelete: Cascade)
+  participantId String
+  participant   TournamentParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  // Normalised answer payload, shape depends on the question type.
+  answer           Json?
+  uploadedImageUrl String?
+  uploadedFileId   String?
+
+  // Server clock only. The client never supplies timing information.
+  submittedAt    DateTime @default(now())
+  responseTimeMs Int
+
+  outcome       SubmissionOutcome @default(PENDING)
+  isCorrect     Boolean?
+  awardedPoints Int               @default(0)
+  basePoints    Int               @default(0)
+  speedBonus    Int               @default(0)
+  status        SubmissionStatus  @default(AUTO_GRADED)
+
+  gradedById String?
+  gradedBy   User?     @relation("SubmissionGrader", fields: [gradedById], references: [id], onDelete: SetNull)
+  gradedAt   DateTime?
+  feedback   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  scores Score[]
+
+  // The most important constraint in the schema: one answer per player per
+  // question, enforced by the database rather than by application logic.
+  @@unique([questionId, userId])
+  @@index([tournamentId, userId])
+  @@index([questionId, outcome])
+  @@index([tournamentId, status])
+}
+
+// Append-only ledger of every point movement, used for audits and analytics.
+model Score {
+  id            String                @id @default(cuid())
+  tournamentId  String
+  tournament    Tournament            @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  participantId String
+  participant   TournamentParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  questionId    String?
+  question      Question?             @relation(fields: [questionId], references: [id], onDelete: SetNull)
+  submissionId  String?
+  submission    Submission?           @relation(fields: [submissionId], references: [id], onDelete: SetNull)
+
+  points Int
+  reason String // ANSWER | MANUAL_GRADE | ADMIN_ADJUSTMENT | DISQUALIFICATION
+  note   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([tournamentId, userId])
+  @@index([submissionId])
+}
+
+model LeaderboardSnapshot {
+  id            String     @id @default(cuid())
+  tournamentId  String
+  tournament    Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  questionId    String?
+  questionOrder Int?
+  isFinal       Boolean    @default(false)
+  // LeaderboardEntry[] - see src/lib/services/leaderboard-service.ts
+  standings     Json
+  createdAt     DateTime   @default(now())
+
+  @@index([tournamentId, createdAt])
+}
+
+model Badge {
+  id          String @id @default(cuid())
+  code        String @unique
+  name        String
+  description String
+  icon        String
+  color       String @default("#7C5CFF")
+
+  awards UserBadge[]
+
+  createdAt DateTime @default(now())
+}
+
+model UserBadge {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badgeId      String
+  badge        Badge       @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  tournamentId String?
+  tournament   Tournament? @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  questionId   String?
+  context      Json?
+  awardedAt    DateTime    @default(now())
+
+  @@unique([userId, badgeId, tournamentId])
+  @@index([userId])
+  @@index([tournamentId])
+}
+
+model Notification {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type   String
+  title  String
+  body   String?
+  data   Json?
+  readAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// Audit trail for every state transition and privileged action.
+model TournamentEvent {
+  id           String     @id @default(cuid())
+  tournamentId String
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  actorId      String?
+  actor        User?      @relation("EventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  type         String
+  payload      Json?
+  createdAt    DateTime   @default(now())
+
+  @@index([tournamentId, createdAt])
+}
+
+// Uploads are stored outside ./public and streamed through an authorised route
+// handler, so a stored file can never be executed or hot-linked.
+model UploadedFile {
+  id           String  @id @default(cuid())
+  ownerId      String
+  owner        User    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  storageKey   String  @unique
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+  purpose      String // SUBMISSION | QUESTION | COVER | AVATAR
+  tournamentId String?
+  questionId   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([ownerId])
+  @@index([tournamentId])
+}
