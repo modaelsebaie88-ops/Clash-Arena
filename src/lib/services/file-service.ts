@@ -138,7 +138,9 @@ export async function readFileForViewer(fileId: string, viewer: FileViewer) {
   const record = await prisma.uploadedFile.findUnique({ where: { id: fileId } });
   if (!record) throw ApiError.notFound('File not found.');
 
-  let allowed = record.ownerId === viewer.id || viewer.role === 'ADMIN';
+  // Cover art is a public decorative banner, not sensitive content - any
+  // signed-in viewer may read it once a tournament is published.
+  let allowed = record.purpose === 'COVER' || record.ownerId === viewer.id || viewer.role === 'ADMIN';
 
   if (!allowed && record.tournamentId) {
     const tournament = await prisma.tournament.findUnique({
